@@ -36,29 +36,20 @@ static NSString* stringFromData(NSData* data) {
 #pragma mark ChromeSocketsUdp interface
 
 @interface ChromeSocketsUdp : CDVPlugin {
-    NSMutableDictionary* _sockets;
-    NSUInteger _nextSocketId;
+    ChromeSocketsUdpSocket _socket;
+    NSUInteger _socketId;
     NSString* _receiveEventsCallbackId;
 }
 
 - (void)create:(CDVInvokedUrlCommand*)command;
-- (void)update:(CDVInvokedUrlCommand*)command;
-- (void)setPaused:(CDVInvokedUrlCommand*)command;
 - (void)bind:(CDVInvokedUrlCommand*)command;
 - (void)send:(CDVInvokedUrlCommand*)command;
 - (void)close:(CDVInvokedUrlCommand*)command;
-- (void)getInfo:(CDVInvokedUrlCommand*)command;
-- (void)getSockets:(CDVInvokedUrlCommand*)command;
 - (void)setBroadcast:(CDVInvokedUrlCommand*)command;
-- (void)joinGroup:(CDVInvokedUrlCommand*)command;
-- (void)leaveGroup:(CDVInvokedUrlCommand*)command;
-- (void)setMulticastTimeToLive:(CDVInvokedUrlCommand*)command;
-- (void)setMulticastLoopbackMode:(CDVInvokedUrlCommand*)command;
-- (void)getJoinedGroups:(CDVInvokedUrlCommand*)command;
 - (void)registerReceiveEvents:(CDVInvokedUrlCommand*)command;
-- (void)closeSocketWithId:(NSNumber*)socketId callbackId:(NSString*)theCallbackId;
-- (void)fireReceiveEventsWithSocketId:(NSUInteger)theSocketId data:(NSData*)theData address:(NSString*)theAddress port:(NSUInteger)thePort;
-- (void)fireReceiveErrorEventsWithSocketId:(NSUInteger)theSocketId error:(NSError*)theError;
+- (void)closeSocket: callbackId:(NSString*)theCallbackId;
+- (void)fireReceiveEventsWithSocket: data:(NSData*)theData address:(NSString*)theAddress port:(NSUInteger)thePort;
+- (void)fireReceiveErrorEventsWithSocket: error:(NSError*)theError;
 @end
 
 #pragma mark ChromeSocketsUdpSocket interface
@@ -104,27 +95,6 @@ static NSString* stringFromData(NSData* data) {
         [self setProperties:theProperties];
     }
     return self;
-}
-
-- (NSDictionary*)getInfo
-{
-    NSString* localAddress = [_socket localHost];
-    NSNumber* localPort = [NSNumber numberWithUnsignedInt:[_socket localPort]];
-
-    NSMutableDictionary* socketInfo = [@{
-        @"socketId": [NSNumber numberWithUnsignedInteger:_socketId],
-        @"persistent": _persistent,
-        @"name": _name,
-        @"bufferSize": _bufferSize,
-        @"paused": _paused,
-    } mutableCopy];
-
-    if (localAddress) {
-        socketInfo[@"localAddress"] = localAddress;
-        socketInfo[@"localPort"] = localPort;
-    }
-    
-    return [socketInfo copy];
 }
 
 - (void)setProperties:(NSDictionary*)theProperties
@@ -209,7 +179,7 @@ static NSString* stringFromData(NSData* data) {
 {
     VERBOSE_LOG(@"udbSocket:didReceiveData socketId: %u", _socketId);
     
-    [_plugin fireReceiveEventsWithSocketId:_socketId data:data address:[GCDAsyncUdpSocket hostFromAddress:address] port:[GCDAsyncUdpSocket portFromAddress:address]];
+    [_plugin fireReceiveEventsWithSocket: data:data address:[GCDAsyncUdpSocket hostFromAddress:address] port:[GCDAsyncUdpSocket portFromAddress:address]];
 }
 
 - (void)udpSocketDidClose:(GCDAsyncUdpSocket *)sock withError:(NSError *)error
@@ -226,8 +196,8 @@ static NSString* stringFromData(NSData* data) {
     if (callback != nil) {
         callback();
     } else if (error) {
-        [_plugin fireReceiveErrorEventsWithSocketId:_socketId error:error];
-        [_plugin closeSocketWithId:[NSNumber numberWithUnsignedInteger:_socketId] callbackId:nil];
+        [_plugin fireReceiveErrorEventsWithSocket: error:error];
+        [_plugin closeSocket: callbackId:nil];
     }
 }
 @end
@@ -236,16 +206,13 @@ static NSString* stringFromData(NSData* data) {
 
 - (void)pluginInitialize
 {
-    _sockets = [NSMutableDictionary dictionary];
-    _nextSocketId = 0;
+    _socketId = 0;
     _receiveEventsCallbackId = nil;
 }
 
 - (void)onReset
-{
-    for (NSNumber* socketId in _sockets) {
-        [self closeSocketWithId:socketId callbackId:nil];
-    }
+{    
+    [self closeSocket: callbackId:nil];    
 }
 
 - (NSDictionary*)buildErrorInfoWithErrorCode:(NSInteger)theErrorCode message:(NSString*)message
@@ -260,63 +227,29 @@ static NSString* stringFromData(NSData* data) {
 {
     NSDictionary* properties = [command argumentAtIndex:0];
 
-    ChromeSocketsUdpSocket *socket = [[ChromeSocketsUdpSocket alloc] initWithId:_nextSocketId++ plugin:self properties:properties];
-    _sockets[[NSNumber numberWithUnsignedInteger:socket->_socketId]] = socket;
-    [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsInt:socket->_socketId] callbackId:command.callbackId];
-}
+    _socket = [[ChromeSocketsUdpSocket alloc] initWithId:_socketId plugin:self properties:properties];
 
-- (void)update:(CDVInvokedUrlCommand*)command
-{
-    NSNumber* socketId = [command argumentAtIndex:0];
-    NSDictionary* properties = [command argumentAtIndex:1];
-    
-    ChromeSocketsUdpSocket *socket = _sockets[socketId];
-    
-    if (socket == nil)
-        return;
-    
-    [socket setProperties:properties];
-    
-    [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
-}
-
-- (void)setPaused:(CDVInvokedUrlCommand *)command
-{
-    NSNumber* socketId = [command argumentAtIndex:0];
-    NSNumber* paused = [command argumentAtIndex:1];
-    
-    ChromeSocketsUdpSocket* socket = _sockets[socketId];
-
-    if (socket == nil)
-        return;
-    
-    [socket setPaused:paused];
     [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
 }
 
 - (void)bind:(CDVInvokedUrlCommand*)command
 {
-    NSNumber* socketId = [command argumentAtIndex:0];
-    NSString* address = [command argumentAtIndex:1];
-    NSUInteger port = [[command argumentAtIndex:2] unsignedIntegerValue];
+    NSString* address = [command argumentAtIndex:0];
+    NSUInteger port = [[command argumentAtIndex:1] unsignedIntegerValue];
 
     if ([address isEqualToString:@"0.0.0.0"])
         address = nil;
 
-    ChromeSocketsUdpSocket* socket = _sockets[socketId];
-
-    if (socket == nil) {
+    if (_socket == nil) {
         [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self buildErrorInfoWithErrorCode:ENOTSOCK message:@"Invalid Argument"]] callbackId:command.callbackId];
         return;
     }
     
     NSError* err;
-    if ([socket->_socket bindToPort:port interface:address error:&err]) {
+    if ([_socket->_socket bindToPort:port interface:address error:&err]) {
         
-        VERBOSE_LOG(@"NTFY %@.%@ Bind", socketId, command.callbackId);
-        
-        if (![socket->_paused boolValue])
-            [socket->_socket beginReceiving:nil];
+        if (![_socket->_paused boolValue])
+            [_socket->_socket beginReceiving:nil];
         
         [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
     } else {
@@ -326,20 +259,17 @@ static NSString* stringFromData(NSData* data) {
 
 - (void)send:(CDVInvokedUrlCommand*)command
 {
-    NSNumber* socketId = [command argumentAtIndex:0];
-    NSString* address = [command argumentAtIndex:1];
-    NSUInteger port = [[command argumentAtIndex:2] unsignedIntegerValue];
-    NSData* data = [command argumentAtIndex:3];
-
-    ChromeSocketsUdpSocket* socket = _sockets[socketId];
+    NSString* address = [command argumentAtIndex:0];
+    NSUInteger port = [[command argumentAtIndex:1] unsignedIntegerValue];
+    NSData* data = [command argumentAtIndex:2];
    
-    if (socket == nil) {
+    if (_socket == nil) {
         [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self buildErrorInfoWithErrorCode:ENOTSOCK message:@"Invalid Argument"]] callbackId:command.callbackId];
         return;
     }
   
     id<CDVCommandDelegate> commandDelegate = self.commandDelegate;
-    [socket->_sendCallbacks addObject:[^(BOOL success, NSError* error) {
+    [_socket->_sendCallbacks addObject:[^(BOOL success, NSError* error) {
         VERBOSE_LOG(@"ACK %@.%@ Write: %d", socketId, command.callbackId, success);
 
         if (success) {
@@ -349,208 +279,51 @@ static NSString* stringFromData(NSData* data) {
         }
     } copy]];
 
-    [socket->_socket sendData:data toHost:address port:port withTimeout:-1 tag:-1];
+    [_socket->_socket sendData:data toHost:address port:port withTimeout:-1 tag:-1];
 }
 
-- (void)closeSocketWithId:(NSNumber*)socketId callbackId:(NSString*)theCallbackId
+- (void)closeSocket: callbackId:(NSString*)theCallbackId
 {
-    ChromeSocketsUdpSocket* socket = _sockets[socketId];
-
-    if (socket == nil)
+    if (_socket == nil)
         return;
   
     id<CDVCommandDelegate> commandDelegate = self.commandDelegate;
-    socket->_closeCallback = [^() {
+    _socket->_closeCallback = [^() {
         if (theCallbackId)
             [commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:theCallbackId];
         
         [_sockets removeObjectForKey:socketId];
     } copy];
    
-    if ([socket->_socket isClosed]) {
-        void(^callback)() = socket->_closeCallback;
-        socket->_closeCallback = nil;
+    if ([_socket->_socket isClosed]) {
+        void(^callback)() = _socket->_closeCallback;
+        _socket->_closeCallback = nil;
         callback();
     } else {
-        [socket->_socket closeAfterSending];
+        [_socket->_socket closeAfterSending];
     }
 }
 
 - (void)close:(CDVInvokedUrlCommand *)command
 {
-    NSNumber* socketId = [command argumentAtIndex:0];
-    [self closeSocketWithId:socketId callbackId:command.callbackId];
+    [self closeSocket: callbackId:command.callbackId];
 }
 
-- (void)getInfo:(CDVInvokedUrlCommand *)command
-{
-    NSNumber* socketId = [command argumentAtIndex:0];
-
-    ChromeSocketsUdpSocket* socket = _sockets[socketId];
-
-    if (socket == nil)
-        return;
-
-    [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsDictionary:[socket getInfo]] callbackId:command.callbackId];
-}
-
-- (void)getSockets:(CDVInvokedUrlCommand *)command
-{
-    NSArray* sockets = [_sockets allValues];
-    NSMutableArray* socketsInfo = [NSMutableArray arrayWithCapacity:[sockets count]];
-    
-    for (ChromeSocketsUdpSocket* socket in sockets) {
-        [socketsInfo addObject: [socket getInfo]];
-    }
-    
-    [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsArray:socketsInfo] callbackId:command.callbackId];
-}
 - (void)setBroadcast:(CDVInvokedUrlCommand *)command
 {
-    NSNumber* socketId = [command argumentAtIndex:0];
-    BOOL enabled = [[command argumentAtIndex:1] boolValue];
+    BOOL enabled = [[command argumentAtIndex:0] boolValue];
     
-    ChromeSocketsUdpSocket* socket = _sockets[socketId];
-    
-    if (socket == nil) {
+    if (_socket == nil) {
         [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self buildErrorInfoWithErrorCode:ENOTSOCK message:@"Invalid Argument"]] callbackId:command.callbackId];
         return;
     }
     
     NSError* err;
-    if([socket->_socket enableBroadcast:(enabled) error:&err]){
+    if([_socket->_socket enableBroadcast:(enabled) error:&err]){
         [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
     }else{
         [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self buildErrorInfoWithErrorCode:[err code] message:[err localizedDescription]]] callbackId:command.callbackId];
     }
-}
-
-- (void)joinGroup:(CDVInvokedUrlCommand *)command
-{
-    NSNumber* socketId = [command argumentAtIndex:0];
-    NSString* address = [command argumentAtIndex:1];
-    
-    ChromeSocketsUdpSocket* socket = _sockets[socketId];
-    if (socket == nil || [socket->_multicastGroups containsObject:address]) {
-        [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self buildErrorInfoWithErrorCode:ENOTSOCK message:@"Invalid Argument"]] callbackId:command.callbackId];
-        return;
-    }
-    
-    VERBOSE_LOG(@"REQ %@.%@ joinGroup", socketId, command.callbackId);
-    
-    NSError* err;
-    if ([socket->_socket joinMulticastGroup:address error:&err]) {
-        [socket->_multicastGroups addObject:address];
-        [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
-    } else {
-        [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self buildErrorInfoWithErrorCode:[err code] message:[err localizedDescription]]] callbackId:command.callbackId];
-    }
-}
-
-
-- (void)leaveGroup:(CDVInvokedUrlCommand *)command
-{
-    NSNumber* socketId = [command argumentAtIndex:0];
-    NSString* address = [command argumentAtIndex:1];
-    
-    ChromeSocketsUdpSocket* socket = _sockets[socketId];
-    if (socket == nil || ![socket->_multicastGroups containsObject:address]) {
-        [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self buildErrorInfoWithErrorCode:ENOTSOCK message:@"Invalid Argument"]] callbackId:command.callbackId];
-        return;
-    }
-   
-    VERBOSE_LOG(@"REQ %@.%@ leaveGroup", socketId, command.callbackId);
-    
-    NSError* err;
-    if ([socket->_socket leaveMulticastGroup:address error:&err]) {
-        [socket->_multicastGroups removeObject:address];
-        [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
-    } else {
-        [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self buildErrorInfoWithErrorCode:[err code] message:[err localizedDescription]]] callbackId:command.callbackId];
-    }
-}
-
-- (void)setMulticastTimeToLive:(CDVInvokedUrlCommand *)command
-{
-    NSNumber* socketId = [command argumentAtIndex:0];
-    NSNumber* ttl = [command argumentAtIndex:1];
-    
-    ChromeSocketsUdpSocket* socket = _sockets[socketId];
-    if (socket == nil) {
-        [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self buildErrorInfoWithErrorCode:ENOTSOCK message:@"Invalid Argument"]] callbackId:command.callbackId];
-        return;
-    }
-    
-    VERBOSE_LOG(@"REQ %@.%@ setMulticastTimeToLive", socketId, command.callbackId);
-  
-    id<CDVCommandDelegate> commandDelegate = self.commandDelegate;
-    [socket->_socket performBlock:^{
-        
-        if ([socket->_socket isIPv4]) {
-            unsigned char ttlCpy = [ttl intValue];
-            if (setsockopt([socket->_socket socket4FD], IPPROTO_IP, IP_MULTICAST_TTL, &ttlCpy, sizeof(ttlCpy)) < 0) {
-                [commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self buildErrorInfoWithErrorCode:errno message:@"setsockopt() failed"]] callbackId:command.callbackId];
-            }
-        }
-        
-        if ([socket->_socket isIPv6]) {
-            int ttlCpy = [ttl intValue];
-            if (setsockopt([socket->_socket socket6FD], IPPROTO_IPV6, IP_MULTICAST_TTL, &ttlCpy, sizeof(ttlCpy)) < 0) {
-                [commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self buildErrorInfoWithErrorCode:errno message:@"setsockopt() failed"]] callbackId:command.callbackId];
-            }
-        }
-        
-        [commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
-    }];
-}
-
-- (void)setMulticastLoopbackMode:(CDVInvokedUrlCommand *)command
-{
-    NSNumber* socketId = [command argumentAtIndex:0];
-    NSNumber* enabled = [command argumentAtIndex:1];
-    
-    ChromeSocketsUdpSocket* socket = _sockets[socketId];
-    
-    if (socket == nil) {
-        [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self buildErrorInfoWithErrorCode:ENOTSOCK message:@"Invalid Argument"]] callbackId:command.callbackId];
-        return;
-    }
-
-    VERBOSE_LOG(@"REQ %@.%@ setMulticastLoopbackMode", socketId, command.callbackId);
-   
-    id<CDVCommandDelegate> commandDelegate = self.commandDelegate;
-    [socket->_socket performBlock:^{
-
-        if ([socket->_socket isIPv4]) {
-            unsigned char loop = [enabled intValue];
-            if (setsockopt([socket->_socket socketFD], IPPROTO_IP, IP_MULTICAST_LOOP, &loop, sizeof(loop)) < 0) {
-                [commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self buildErrorInfoWithErrorCode:errno message:@"setsockopt() failed"]] callbackId:command.callbackId];
-            }
-        }
-        
-        if ([socket->_socket isIPv6]) {
-            int loop = [enabled intValue];
-            if (setsockopt([socket->_socket socket6FD], IPPROTO_IPV6, IP_MULTICAST_LOOP, &loop, sizeof(loop)) < 0) {
-                [commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:[self buildErrorInfoWithErrorCode:errno message:@"setsockopt() failed"]] callbackId:command.callbackId];
-            }
-        }
-        
-        [commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
-    }];
-}
-
-- (void)getJoinedGroups:(CDVInvokedUrlCommand *)command
-{
-    NSNumber* socketId = [command argumentAtIndex:0];
-    
-    ChromeSocketsUdpSocket* socket = _sockets[socketId];
-    if (socket == nil)
-        return;
-    
-    VERBOSE_LOG(@"REQ %@.%@ getJoinedGroups", socketId, command.callbackId);
-    
-    NSArray *ret = [socket->_multicastGroups allObjects];
-    [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsArray:ret] callbackId:command.callbackId];
 }
 
 - (void)registerReceiveEvents:(CDVInvokedUrlCommand*)command
@@ -559,12 +332,11 @@ static NSString* stringFromData(NSData* data) {
     _receiveEventsCallbackId = command.callbackId;
 }
 
-- (void)fireReceiveEventsWithSocketId:(NSUInteger)theSocketId data:(NSData*)theData address:(NSString*)theAddress port:(NSUInteger)thePort
+- (void)fireReceiveEventsWithSocket: data:(NSData*)theData address:(NSString*)theAddress port:(NSUInteger)thePort
 {
     assert(_receiveEventsCallbackId != nil);
 
     NSArray *info = @[
-        [NSNumber numberWithUnsignedInteger:theSocketId],
         theData,
         theAddress,
         [NSNumber numberWithInteger:thePort],
@@ -576,12 +348,11 @@ static NSString* stringFromData(NSData* data) {
     [self.commandDelegate sendPluginResult:result callbackId:_receiveEventsCallbackId];
 }
 
-- (void)fireReceiveErrorEventsWithSocketId:(NSUInteger)theSocketId error:(NSError*)theError
+- (void)fireReceiveErrorEventsWithSocket: error:(NSError*)theError
 {
     assert(_receiveEventsCallbackId != nil);
     
     NSDictionary* info = @{
-        @"socketId": [NSNumber numberWithUnsignedInteger:theSocketId],
         @"resultCode": [NSNumber numberWithUnsignedInt:[theError code]],
         @"message": [theError localizedDescription],
     };
