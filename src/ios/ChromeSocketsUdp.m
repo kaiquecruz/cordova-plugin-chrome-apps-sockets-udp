@@ -279,7 +279,7 @@ static NSString* stringFromData(NSData* data) {
         }
     } copy]];
 
-    [_socket->_socket sendData:data toHost:address port:port withTimeout:-1 tag:-1];
+    [_socket->_socket sendData:data toHost:address port:port withTimeout:3 tag:-1];
 }
 
 - (void)closeSocket: callbackId:(NSString*)theCallbackId
